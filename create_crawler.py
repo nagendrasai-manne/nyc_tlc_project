@@ -4,11 +4,23 @@ import time
 from botocore.exceptions import ClientError
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-CRAWLER_NAME   = "nyc-tlc-hvfhv-crawler"
-DATABASE_NAME  = "nyc_tlc_db"
-S3_DATA_PREFIX = "hvfhv/"
-REGION         = "us-east-1"
-GLUE_IAM_ROLE  = "AWSGlueServiceRole-nyc-tlc"
+DATABASE_NAME = "nyc_tlc_db"
+REGION        = "us-east-1"
+GLUE_IAM_ROLE = "AWSGlueServiceRole-nyc-tlc"
+
+# Define each crawler as (name, s3_prefix, description)
+CRAWLERS = [
+    (
+        "nyc-tlc-crawler",
+        "raw/hvfhv/",
+        "Crawls NYC TLC HVFHV parquet files from S3",
+    ),
+    (
+        "zone-crawler-for-nyc-tlc",
+        "raw/zone_lookup/",
+        "Crawls NYC TLC zone look up csv files from S3",
+    ),
+]
 # ──────────────────────────────────────────────────────────────────────────────
 
 TRUST_POLICY = {
@@ -101,13 +113,13 @@ def ensure_iam_role(bucket_name):
 
 # ── Step 2: Crawler ───────────────────────────────────────────────────────────
 
-def create_crawler(glue_client, bucket_name):
-    """Create the Glue crawler if it doesn't already exist."""
-    s3_target_path = f"s3://{bucket_name}/{S3_DATA_PREFIX}"
+def create_crawler(glue_client, bucket_name, crawler_name, s3_prefix, description):
+    """Create a Glue crawler if it doesn't already exist."""
+    s3_target_path = f"s3://{bucket_name}/{s3_prefix}"
 
     try:
-        glue_client.get_crawler(Name=CRAWLER_NAME)
-        print(f"Crawler already exists: {CRAWLER_NAME}")
+        glue_client.get_crawler(Name=crawler_name)
+        print(f"Crawler already exists: {crawler_name}")
         return True
     except ClientError as e:
         if e.response["Error"]["Code"] != "EntityNotFoundException":
@@ -116,10 +128,10 @@ def create_crawler(glue_client, bucket_name):
 
     try:
         glue_client.create_crawler(
-            Name=CRAWLER_NAME,
+            Name=crawler_name,
             Role=GLUE_IAM_ROLE,
             DatabaseName=DATABASE_NAME,
-            Description="Crawls NYC TLC HVFHV parquet files from S3",
+            Description=description,
             Targets={"S3Targets": [{"Path": s3_target_path}]},
             SchemaChangePolicy={
                 "UpdateBehavior": "UPDATE_IN_DATABASE",
@@ -128,7 +140,7 @@ def create_crawler(glue_client, bucket_name):
             RecrawlPolicy={"RecrawlBehavior": "CRAWL_EVERYTHING"},
             Configuration='{"Version":1.0,"CrawlerOutput":{"Partitions":{"AddOrUpdateBehavior":"InheritFromTable"}}}',
         )
-        print(f"✔ Crawler created: {CRAWLER_NAME}")
+        print(f"✔ Crawler created: {crawler_name}")
         print(f"  Target  : {s3_target_path}")
         print(f"  Database: {DATABASE_NAME}")
         return True
@@ -137,11 +149,11 @@ def create_crawler(glue_client, bucket_name):
         return False
 
 
-def run_crawler(glue_client):
+def run_crawler(glue_client, crawler_name):
     """Start the crawler and wait for it to finish."""
     try:
-        glue_client.start_crawler(Name=CRAWLER_NAME)
-        print(f"\n▶ Crawler started: {CRAWLER_NAME}")
+        glue_client.start_crawler(Name=crawler_name)
+        print(f"\n▶ Crawler started: {crawler_name}")
     except ClientError as e:
         if e.response["Error"]["Code"] == "CrawlerRunningException":
             print("Crawler is already running.")
@@ -152,7 +164,7 @@ def run_crawler(glue_client):
     print("  Waiting for crawler to complete", end="", flush=True)
     while True:
         time.sleep(15)
-        response = glue_client.get_crawler(Name=CRAWLER_NAME)
+        response = glue_client.get_crawler(Name=crawler_name)
         state = response["Crawler"]["State"]
         print(".", end="", flush=True)
         if state == "READY":
@@ -171,18 +183,21 @@ def main():
     print(f"Bucket  : s3://{bucket_name}")
     print(f"Database: {DATABASE_NAME}\n")
 
-    # Step 1: ensure IAM role exists
+    # Step 1: ensure IAM role exists (shared by all crawlers)
     role_arn = ensure_iam_role(bucket_name)
     if not role_arn:
         print("Aborting: could not create IAM role.")
         return
 
-    # Step 2: create and run crawler
+    # Step 2: create and run each crawler
     glue_client = boto3.client("glue", region_name=REGION)
-    created = create_crawler(glue_client, bucket_name)
-    if created:
-        run_crawler(glue_client)
-        print("\nDone. Check AWS Glue → Databases → nyc_tlc_db for the new tables.")
+    for crawler_name, s3_prefix, description in CRAWLERS:
+        print(f"\n── {crawler_name} ──")
+        created = create_crawler(glue_client, bucket_name, crawler_name, s3_prefix, description)
+        if created:
+            run_crawler(glue_client, crawler_name)
+
+    print("\nDone. Check AWS Glue → Databases → nyc_tlc_db for the new tables.")
 
 
 if __name__ == "__main__":
