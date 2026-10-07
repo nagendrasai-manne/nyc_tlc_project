@@ -142,7 +142,7 @@ def download_to_tempfile(url: str, label: str) -> Optional[tempfile.SpooledTempo
     Returns the open temp file seeked to 0 on success, or None on failure.
     The caller must close the file.
     """
-    logger.info("Downloading %s ...", label)
+    logger.info("──── Starting download: %s ────", label)
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -158,20 +158,29 @@ def download_to_tempfile(url: str, label: str) -> Optional[tempfile.SpooledTempo
             tmp   = tempfile.SpooledTemporaryFile(max_size=64 * 1_048_576)
             total = 0
 
-            total_size = int(response.headers.get("content-length", 0))
+            total_size     = int(response.headers.get("content-length", 0))
+            total_size_mb  = total_size / 1_048_576
+            last_log_pct   = -1   # track last logged percentage milestone
+
             for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
                 if chunk:
                     tmp.write(chunk)
                     total += len(chunk)
                     if total_size > 0:
-                        print(
-                            f"\r  Progress: {total / total_size * 100:.1f}%",
-                            end="", flush=True,
-                        )
+                        pct = int(total / total_size * 100)
+                        # Log every 10 % milestone to avoid flooding logs
+                        if pct // 10 > last_log_pct // 10:
+                            last_log_pct = pct
+                            logger.info(
+                                "  [%s]  %d%%  (%.1f / %.1f MB)",
+                                label, pct, total / 1_048_576, total_size_mb,
+                            )
 
-            print()  # newline after progress bar
             tmp.seek(0)
-            logger.info("Downloaded %s  (%.1f MB)", label, total / 1_048_576)
+            logger.info(
+                "Download complete  [%s]  %.1f MB total",
+                label, total / 1_048_576,
+            )
             return tmp
 
         except (requests.RequestException, requests.HTTPError) as e:
@@ -316,11 +325,16 @@ def download_taxi_data_to_s3(
     uploaded: List[str] = []
     year, month = start_year, start_month
 
-    for _ in range(num_months):
+    for i in range(num_months):
         month_str = f"{month:02d}"
         file_name = f"{data_type}_{year}-{month_str}.parquet"
         url       = f"{BASE_URL}/{file_name}"
         s3_key    = f"{S3_PREFIX}/{s3_folder}/year={year}/month={month_str}/{file_name}"
+
+        logger.info(
+            "── Month %d/%d  [%s]  %d-%s ──",
+            i + 1, num_months, data_type, year, month_str,
+        )
 
         if download_and_upload_to_s3(url, s3_key, s3_client, file_name):
             uploaded.append(s3_key)
@@ -437,20 +451,20 @@ def main() -> None:
             })
 
         else:
-            # Historical mode: full 2024 + current year up to (but not including) latest month
-            logger.info("[%s] historical mode → full 2024 + partial %d", label, latest_year)
+            # Historical mode: full 2025 + current year up to (but not including) latest month
+            logger.info("[%s] historical mode → full 2025 + partial %d", label, latest_year)
 
             # Full 2024
             download_configs.append({
                 "data_type":   data_type,
                 "s3_folder":   s3_folder,
-                "start_year":  2024,
+                "start_year":  2025,
                 "start_month": 1,
                 "num_months":  12,
             })
 
             # Current year up to latest_month - 1 (leave latest for first incremental run)
-            if latest_year > 2024 and latest_month > 1:
+            if latest_year > 2025 and latest_month > 1:
                 months_to_download = latest_month - 1
                 logger.info(
                     "[%s] adding %d Jan–%02d to queue",
