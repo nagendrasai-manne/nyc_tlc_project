@@ -24,6 +24,17 @@ logger = logging.getLogger(__name__)
 # Initialize Glue job
 # ──────────────────────────────────────────────
 args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+
+# Resolve jobtype — defaults to 'historical' if not provided
+try:
+    _jobtype_args = getResolvedOptions(sys.argv, ['jobtype'])
+    JOB_TYPE = _jobtype_args['jobtype'].lower()
+except Exception:
+    JOB_TYPE = 'historical'
+    logger.info("No 'jobtype' parameter provided – defaulting to 'historical'")
+
+logger.info("Job type: %s", JOB_TYPE)
+
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
@@ -264,7 +275,18 @@ if not partitions:
     logger.warning("No year/month partitions found. Processing %s/ as a single batch.", RAW_BASE_PATH)
     partitions = [(None, None)]
 
-logger.info("Discovered %d partition(s) to process.", len(partitions))
+logger.info("Discovered %d partition(s) in S3.", len(partitions))
+
+# ── Filter partitions based on jobtype ────────────────────────────────────────
+if JOB_TYPE == 'current':
+    # current mode: process only the latest (most recent) partition
+    partitions = [partitions[-1]]
+    logger.info("current mode → processing latest partition only: %s-%02d", partitions[0][0], partitions[0][1])
+else:
+    # historical mode: process all discovered partitions (default)
+    logger.info("historical mode → processing all %d partition(s).", len(partitions))
+
+logger.info("Partitions to process: %s", partitions)
 
 total_written  = 0
 total_rejected = 0
@@ -363,5 +385,14 @@ logger.info("  Total records written    : %s", f"{total_written:,}")
 logger.info("  Total records rejected   : %s", f"{total_rejected:,}")
 logger.info("  Total job duration       : %.1f seconds (%.1f minutes)", job_secs, job_mins)
 logger.info("=" * 60)
+
+# ──────────────────────────────────────────────
+# MSCK REPAIR — sync Glue catalog partitions
+# ──────────────────────────────────────────────
+# Registers any new year/month/day partitions written above so Athena
+# can query them immediately without running a full Glue crawler.
+logger.info("Running MSCK REPAIR TABLE on nyc_tlc_db.curated_hvfhv ...")
+spark.sql("MSCK REPAIR TABLE nyc_tlc_db.curated_hvfhv")
+logger.info("MSCK REPAIR TABLE complete.")
 
 job.commit()
