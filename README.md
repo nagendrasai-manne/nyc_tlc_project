@@ -1,31 +1,45 @@
 # NYC TLC Data Pipeline
 
-A cloud-native ETL pipeline for ingesting, cleaning, cataloging, and aggregating NYC TLC trip data using Amazon S3, AWS Glue, AWS Lambda, AWS Step Functions, and Amazon SNS.
+A cloud-native ETL and analytics pipeline for ingesting, cleaning, cataloging, and aggregating NYC TLC trip data using Amazon S3, AWS Glue, AWS Lambda, AWS Step Functions, and Amazon SNS.
 
-This project automates the full data lifecycle for public NYC TLC trip data:
+This project automates the full lifecycle of public NYC TLC trip data:
 
-- downloads trip files from the TLC public data source
-- stores source data in S3
+- downloads trip files from the TLC public source
+- stores raw source data in S3
 - creates metadata and crawler definitions in AWS Glue
-- validates and transforms raw data into curated datasets
+- validates and transforms raw records into curated datasets
 - aggregates trip data by borough, zone, and service pattern
-- orchestrates the workflow with AWS Step Functions
+- orchestrates the workflow with Step Functions
 - sends success/failure alerts through SNS
+
+---
+
+## Project at a glance
+
+- Data source: NYC Taxi & Limousine Commission trip records
+- Storage: Amazon S3
+- Transformation: AWS Glue ETL with PySpark
+- Metadata catalog: AWS Glue Data Catalog
+- Orchestration: AWS Step Functions
+- Notification: Amazon SNS
+- Modes supported: Historical and Current (incremental monthly refresh)
 
 ---
 
 ## Why this project exists
 
-The pipeline follows a classic medallion-style lakehouse approach:
+The pipeline follows a medallion-style lakehouse approach:
 
 - Raw layer: original files downloaded from the TLC source
 - Curated layer: cleaned, normalized, validated trip records
 - Aggregated layer: daily analytical summaries for reporting and BI
 
-It is built for two operational modes:
+This design supports both:
 
-- Historical mode: first-time full backfill of existing data
-- Current mode: monthly incremental refreshes
+- Historical mode: first-time full backfill of available data
+- Current mode: monthly incremental refreshes for ongoing ingestion
+
+The business value is straightforward: NYC TLC data becomes query-ready and continuously refreshable for reporting, trend analysis, and operational insight without manual processing.
 
 ---
 
@@ -33,23 +47,23 @@ It is built for two operational modes:
 
 ```mermaid
 flowchart LR
-    A[NYC TLC Public Data Source] --> B[AWS Step Functions\nnyc_tlc_orchestration.asl.json]
-    B --> C[Lambda: bucket_creation]
-    B --> D[Lambda: create_crawler]
-    C --> E[(Amazon S3\nraw / curated / aggregated)]
-    D --> E
-    E --> F[AWS Glue ETL\nData download upload]
-    F --> G[AWS Glue Crawler\nraw catalog]
-    G --> H[AWS Glue ETL\nRaw to Curated]
-    H --> I[AWS Glue Crawler\ncurated catalog]
-    I --> J[AWS Glue ETL\nCurated to Aggregated]
-    J --> K[AWS Glue Crawler\naggregated catalog]
-    K --> L[Amazon SNS\nSuccess / Failure alerts]
+    A[NYC TLC Public Data Source] --> B[(Amazon S3\nRaw layer)]
+    B --> C[AWS Glue Crawler\nRaw catalog]
+    C --> D[AWS Glue ETL\nRaw to Curated]
+    D --> E[(Amazon S3\nCurated layer)]
+    E --> F[AWS Glue Crawler\nCurated catalog]
+    F --> G[AWS Glue ETL\nCurated to Aggregated]
+    G --> H[(Amazon S3\nAggregated layer)]
+    H --> I[AWS Glue Crawler\nAggregated catalog]
+
+    K[AWS Step Functions\nOrchestrator] --> L[Lambda: bucket_creation]
+    K --> M[Lambda: create_crawler]
+    L --> B
+    M --> C
+    I --> J[Amazon SNS\nAlerts and notifications]
 ```
 
-The orchestration is defined in:
-
-- `nyc_tlc_orchestration.asl.json` — Step Functions workflow
+The workflow is orchestrated by AWS Step Functions, with Lambda functions used for bootstrap tasks and Glue jobs handling the data processing stages.
 
 ---
 
@@ -62,7 +76,6 @@ nyc_tlc_project/
 ├── data_download_upload.py
 ├── raw_to_curated_nyc_tlc_bookmark.py
 ├── curated_to_aggregated_nyc_tlc_bookmark.py
-├── nyc_tlc_orchestration.asl.json
 ├── README.md
 └── .git/
 ```
@@ -84,8 +97,8 @@ nyc_tlc_project/
 - `curated_to_aggregated_nyc_tlc_bookmark.py`  
   Enriches the curated data with taxi zone metadata and creates summary aggregation tables.
 
-- `nyc_tlc_orchestration.asl.json`  
-  Defines the Step Functions orchestration for the entire ETL pipeline.
+- AWS Step Functions orchestration  
+  Coordinates the overall ETL workflow across bucket setup, Glue setup, data ingestion, transformation, aggregation, and notifications.
 
 ---
 
@@ -218,27 +231,27 @@ These gold-layer tables are intended for dashboards, KPI analysis, and downstrea
 
 ### 6) Workflow orchestration with Step Functions
 
-The state machine in `nyc_tlc_orchestration.asl.json` executes the pipeline in this order:
+The pipeline is orchestrated by AWS Step Functions in the following sequence:
 
-1. `CreateS3Bucket`
-2. `CreateGlueCrawlers`
-3. `DataDownloadAndUpload`
+1. create the S3 bucket
+2. configure the required Glue crawlers and metadata
+3. download and upload the raw NYC TLC files
 4. start raw and zone crawlers in parallel
-5. `RawToCurated`
-6. `curated-crawler`
-7. `CuratedToAggregated`
-8. `aggregated-crawler`
-9. `SNS Publish`
-10. final success/failure state
+5. run the raw-to-curated transformation
+6. crawl the curated layer
+7. run the curated-to-aggregated transformation
+8. crawl the aggregated layer
+9. publish the workflow outcome through SNS
+10. terminate in success or failure state
 
 The workflow includes retry handling and failure capture. On error:
 
-- the error is written to `$.error`
-- the pipeline moves to `NotifyFailure`
+- the failure is captured in the Step Functions execution state
+- a notification path is triggered
 - an SNS alert is sent
-- the workflow ends in `PipelineFailed`
+- the workflow ends in a failed execution state
 
-On success, it ends in `PipelineSucceeded`.
+On success, the workflow completes successfully.
 
 ---
 
@@ -306,7 +319,7 @@ Before deploying this pipeline, ensure the following are available in the target
 
 A standard run looks like this:
 
-1. Start the Step Functions state machine
+1. Start the Step Functions orchestration
 2. S3 bucket is created automatically if it does not exist
 3. Glue database and crawlers are created or validated
 4. latest TLC parquet files are downloaded
@@ -316,6 +329,18 @@ A standard run looks like this:
 8. aggregated daily summary tables are created
 9. aggregated output is crawled
 10. an SNS success or failure notification is published
+
+---
+
+## Business value and output
+
+This project turns public TLC trip data into an operational analytics foundation. It enables:
+
+- trend analysis across time and geography
+- borough, zone, and service-level KPI tracking
+- cleanup and validation of messy source feeds before analysis
+- repeatable monthly ingestion without manual intervention
+- a structured lakehouse pattern suitable for downstream BI tools and analytics workloads
 
 ---
 
