@@ -43,30 +43,6 @@ The business value is straightforward: NYC TLC data becomes query-ready and cont
 
 ---
 
-## Architecture overview
-
-```mermaid
-flowchart LR
-    A[NYC TLC Public Data Source] --> B[(Amazon S3\nRaw layer)]
-    B --> C[AWS Glue Crawler\nRaw catalog]
-    C --> D[AWS Glue ETL\nRaw to Curated]
-    D --> E[(Amazon S3\nCurated layer)]
-    E --> F[AWS Glue Crawler\nCurated catalog]
-    F --> G[AWS Glue ETL\nCurated to Aggregated]
-    G --> H[(Amazon S3\nAggregated layer)]
-    H --> I[AWS Glue Crawler\nAggregated catalog]
-
-    K[AWS Step Functions\nOrchestrator] --> L[Lambda: bucket_creation]
-    K --> M[Lambda: create_crawler]
-    L --> B
-    M --> C
-    I --> J[Amazon SNS\nAlerts and notifications]
-```
-
-The workflow is orchestrated by AWS Step Functions, with Lambda functions used for bootstrap tasks and Glue jobs handling the data processing stages.
-
----
-
 ## Repository structure
 
 ```text
