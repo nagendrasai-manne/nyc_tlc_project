@@ -1,0 +1,268 @@
+{
+    "Comment": "NYC TLC Pipeline Orchestration — full historical bootstrap then incremental monthly ingestion",
+    "StartAt": "CreateS3Bucket",
+    "States": {
+        "CreateS3Bucket": {
+            "Type": "Task",
+            "Comment": "Creates the nyc-tlc-<account_id> S3 bucket if it does not already exist.",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:929026881396:function:bucket_creation",
+                "Payload": {
+                    "region": "us-east-1"
+                }
+            },
+            "ResultSelector": {
+                "bucketName.$": "$.Payload.bucket_name",
+                "status.$": "$.Payload.status"
+            },
+            "ResultPath": "$.s3Result",
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "Lambda.ServiceException",
+                        "Lambda.AWSLambdaException",
+                        "Lambda.SdkClientException"
+                    ],
+                    "IntervalSeconds": 5,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                }
+            ],
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "ResultPath": "$.error",
+                    "Next": "NotifyFailure"
+                }
+            ],
+            "Next": "CreateGlueCrawlers"
+        },
+        "CreateGlueCrawlers": {
+            "Type": "Task",
+            "Comment": "Creates the nyc-tlc-crawler (hvfhv) and zone-crawler-for-nyc-tlc crawlers if they do not exist.",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+                "Payload": {},
+                "FunctionName": "arn:aws:lambda:us-east-1:929026881396:function:nyc-tlc-create-crawlers"
+            },
+            "ResultSelector": {
+                "statusCode.$": "$.Payload.statusCode",
+                "body.$": "$.Payload.body"
+            },
+            "ResultPath": "$.crawlerSetupResult",
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "Lambda.ServiceException",
+                        "Lambda.AWSLambdaException"
+                    ],
+                    "IntervalSeconds": 5,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                }
+            ],
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "ResultPath": "$.error",
+                    "Next": "NotifyFailure"
+                }
+            ],
+            "Next": "DataDownloadAndUpload"
+        },
+        "DataDownloadAndUpload": {
+            "Type": "Task",
+            "Comment": "Runs the Glue ETL job that downloads NYC TLC parquet files from the TLC CDN and uploads them to s3://nyc-tlc-<account>/raw/. Pass jobtype=historical for first run, jobtype=current for incremental.",
+            "Resource": "arn:aws:states:::glue:startJobRun.sync",
+            "Parameters": {
+                "JobName": "historical_and_current_upload_for_nyc_tlc",
+                "Arguments": {
+                    "--jobtype.$": "$.jobtype",
+                    "--job-bookmark-option": "job-bookmark-disable"
+                }
+            },
+            "ResultSelector": {
+                "jobRunId.$": "$.Id",
+                "jobtype.$": "$.Arguments['--jobtype']"
+            },
+            "ResultPath": "$.downloadJobResult",
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "Glue.ConcurrentRunsExceededException"
+                    ],
+                    "IntervalSeconds": 60,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                }
+            ],
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "ResultPath": "$.error",
+                    "Next": "NotifyFailure"
+                }
+            ],
+            "Next": "start-raw&zone-lookup-crawlers"
+        },
+        "start-raw&zone-lookup-crawlers": {
+            "Type": "Parallel",
+            "Next": "RawToCurated",
+            "Branches": [
+                {
+                    "StartAt": "nyc-tlc-crawler",
+                    "States": {
+                        "nyc-tlc-crawler": {
+                            "Type": "Task",
+                            "Parameters": {
+                                "Name": "nyc-tlc-crawler"
+                            },
+                            "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+                            "End": true
+                        }
+                    }
+                },
+                {
+                    "StartAt": "zone-lookup-crawler",
+                    "States": {
+                        "zone-lookup-crawler": {
+                            "Type": "Task",
+                            "Parameters": {
+                                "Name": "zone-crawler-for-nyc-tlc"
+                            },
+                            "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+                            "End": true
+                        }
+                    }
+                }
+            ]
+        },
+        "RawToCurated": {
+            "Type": "Task",
+            "Comment": "Runs the raw→curated Glue ETL job. Transforms, validates, and writes cleaned HVFHV data to s3://nyc-tlc-<account>/curated/hvfhv/ partitioned by year/month. Pass jobtype=historical for full backfill, jobtype=current for incremental bookmark run.",
+            "Resource": "arn:aws:states:::glue:startJobRun.sync",
+            "Parameters": {
+                "JobName": "raw_to_curated_nyc_tlc_bookmark",
+                "Arguments": {
+                    "--jobtype.$": "$.downloadJobResult.jobtype",
+                    "--job-bookmark-option": "job-bookmark-enable"
+                }
+            },
+            "ResultSelector": {
+                "jobRunId.$": "$.Id"
+            },
+            "ResultPath": "$.rawToCuratedResult",
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "Glue.ConcurrentRunsExceededException"
+                    ],
+                    "IntervalSeconds": 60,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                }
+            ],
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "ResultPath": "$.error",
+                    "Next": "NotifyFailure"
+                }
+            ],
+            "Next": "curated-crawler"
+        },
+        "curated-crawler": {
+            "Type": "Task",
+            "Parameters": {
+                "Name": "nyc-tlc-curated-crawler"
+            },
+            "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+            "Next": "CuratedToAggregated"
+        },
+        "CuratedToAggregated": {
+            "Type": "Task",
+            "Comment": "Runs the curated→aggregated Glue ETL job. Produces three aggregation tables (daily_borough, daily_zone, daily_service) in s3://nyc-tlc-<account>/aggregated/. Pass jobtype=historical for full backfill, jobtype=current for bookmark-based incremental run.",
+            "Resource": "arn:aws:states:::glue:startJobRun.sync",
+            "Parameters": {
+                "JobName": "curated_to_aggregated_nyc_tlc_bookmark",
+                "Arguments": {
+                    "--jobtype.$": "$.downloadJobResult.jobtype",
+                    "--job-bookmark-option": "job-bookmark-enable"
+                }
+            },
+            "ResultSelector": {
+                "jobRunId.$": "$.Id"
+            },
+            "ResultPath": "$.curatedToAggResult",
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "Glue.ConcurrentRunsExceededException"
+                    ],
+                    "IntervalSeconds": 60,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                }
+            ],
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "ResultPath": "$.error",
+                    "Next": "NotifyFailure"
+                }
+            ],
+            "Next": "aggregated-crawler"
+        },
+        "aggregated-crawler": {
+            "Type": "Task",
+            "Parameters": {
+                "Name": "nyc-tlc-aggregated-crawler"
+            },
+            "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+            "Next": "success_notification"
+        },
+        "success_notification": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::sns:publish",
+            "Parameters": {
+                "Message.$": "$.States.Format('NYC TLC pipeline completed successfully. Execution: {} ({}). Bucket: {}.', $$.Execution.Name, $$.Execution.Id, $.s3Result.bucketName)",
+                "TopicArn": "arn:aws:sns:us-east-1:929026881396:nyc-tlc-topic"
+            },
+            "Next": "PipelineSucceeded"
+        },
+        "NotifyFailure": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::sns:publish",
+            "Parameters": {
+                "TopicArn": "arn:aws:sns:us-east-1:929026881396:nyc-tlc-topic",
+                "Message.$": "$.States.Format('NYC TLC pipeline failed. Execution: {} ({}). Error details: {}', $$.Execution.Name, $$.Execution.Id, States.JsonToString($.error))"
+            },
+            "ResultSelector": {
+                "messageId.$": "$.MessageId"
+            },
+            "ResultPath": "$.notificationResult",
+            "Next": "PipelineFailed"
+        },
+        "PipelineFailed": {
+            "Type": "Fail",
+            "Comment": "A pipeline state failed; the error is recorded in the execution history.",
+            "Error": "PipelineError",
+            "Cause": "A pipeline step failed and an SNS notification was attempted."
+        },
+        "PipelineSucceeded": {
+            "Type": "Succeed",
+            "Comment": "All pipeline stages completed successfully."
+        }
+    }
+}
