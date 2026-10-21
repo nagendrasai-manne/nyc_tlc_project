@@ -18,6 +18,7 @@ jobs:
       CRAWLER_SETUP_LAMBDA_NAME: ${{ vars.CRAWLER_SETUP_LAMBDA_NAME || 'nyc-tlc-create-crawlers' }}
       SNS_TOPIC_NAME: ${{ vars.SNS_TOPIC_NAME || 'nyc-tlc-topic' }}
 
+
     steps:
       - name: Check out source
         uses: actions/checkout@v4

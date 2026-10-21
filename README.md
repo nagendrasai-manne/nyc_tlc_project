@@ -379,7 +379,6 @@ These outputs can be consumed by Athena, Glue, dashboards, and downstream analyt
 - The workflow is designed for automation rather than manual notebook-based execution.
 
 ---
-
 ## Summary
 
 This repository implements a robust, automated NYC TLC analytics pipeline on AWS. It covers the full lifecycle of public transportation data: ingestion, metadata registration, validation, transformation, aggregation, and alerting. It is suitable for both initial data backfills and ongoing monthly refreshes in a cloud-native data engineering stack.
