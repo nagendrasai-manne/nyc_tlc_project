@@ -1,0 +1,106 @@
+name: Deploy NYC TLC pipeline
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      DEPLOYMENT_BUCKET: ${{ vars.DEPLOYMENT_BUCKET }}
+      STATE_MACHINE_ARN: ${{ vars.STATE_MACHINE_ARN }}
+      BUCKET_CREATION_LAMBDA_NAME: ${{ vars.BUCKET_CREATION_LAMBDA_NAME || 'bucket_creation' }}
+      CRAWLER_SETUP_LAMBDA_NAME: ${{ vars.CRAWLER_SETUP_LAMBDA_NAME || 'nyc-tlc-create-crawlers' }}
+      SNS_TOPIC_NAME: ${{ vars.SNS_TOPIC_NAME || 'nyc-tlc-topic' }}
+
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate Python and workflow definition
+        shell: bash
+        run: |
+          python - <<'PY'
+          import ast
+          import json
+          from pathlib import Path
+
+          for path in Path(".").glob("*.py"):
+              ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+              print(f"Python syntax OK: {path}")
+
+          json.loads(Path("nyc_tlc_orchestration.asl.json").read_text(encoding="utf-8"))
+          print("Step Functions definition JSON OK")
+          PY
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy Lambda functions and Glue scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${DEPLOYMENT_BUCKET:?Set the DEPLOYMENT_BUCKET repository variable}"
+          : "${STATE_MACHINE_ARN:?Set the STATE_MACHINE_ARN repository variable}"
+          : "${AWS_DEPLOY_ROLE_ARN:?Set the AWS_DEPLOY_ROLE_ARN secret}"
+
+          account_id="$(aws sts get-caller-identity --query Account --output text)"
+          script_prefix="s3://${DEPLOYMENT_BUCKET}/nyc-tlc/scripts"
+
+          aws s3 cp data_download_upload.py "${script_prefix}/data_download_upload.py"
+          aws s3 cp raw_to_curated_nyc_tlc_bookmark.py "${script_prefix}/raw_to_curated_nyc_tlc_bookmark.py"
+          aws s3 cp curated_to_aggregated_nyc_tlc_bookmark.py "${script_prefix}/curated_to_aggregated_nyc_tlc_bookmark.py"
+
+          update_glue_job() {
+            local job_name="$1"
+            local script_name="$2"
+            local job_update
+            job_update="$(jq -nc \
+              --arg location "${script_prefix}/${script_name}" \
+              '{Command:{Name:"glueetl",ScriptLocation:$location,PythonVersion:"3"}}')"
+            aws glue update-job --job-name "${job_name}" --job-update "${job_update}"
+          }
+
+          update_glue_job "historical_and_current_upload_for_nyc_tlc" "data_download_upload.py"
+          update_glue_job "raw_to_curated_nyc_tlc_bookmark" "raw_to_curated_nyc_tlc_bookmark.py"
+          update_glue_job "curated_to_aggregated_nyc_tlc_bookmark" "curated_to_aggregated_nyc_tlc_bookmark.py"
+
+          zip -j "${RUNNER_TEMP}/bucket_creation.zip" bucket_creation.py
+          aws lambda update-function-code \
+            --function-name "${BUCKET_CREATION_LAMBDA_NAME}" \
+            --zip-file "fileb://${RUNNER_TEMP}/bucket_creation.zip"
+
+          zip -j "${RUNNER_TEMP}/create_crawler.zip" create_crawler.py
+          aws lambda update-function-code \
+            --function-name "${CRAWLER_SETUP_LAMBDA_NAME}" \
+            --zip-file "fileb://${RUNNER_TEMP}/create_crawler.zip"
+
+          jq \
+            --arg bucketLambdaArn "arn:aws:lambda:${AWS_REGION}:${account_id}:function:${BUCKET_CREATION_LAMBDA_NAME}" \
+            --arg crawlerLambdaArn "arn:aws:lambda:${AWS_REGION}:${account_id}:function:${CRAWLER_SETUP_LAMBDA_NAME}" \
+            --arg topicArn "arn:aws:sns:${AWS_REGION}:${account_id}:${SNS_TOPIC_NAME}" \
+            '.States.CreateS3Bucket.Parameters.FunctionName = $bucketLambdaArn |
+             .States.CreateGlueCrawlers.Parameters.FunctionName = $crawlerLambdaArn |
+             .States.success_notification.Parameters.TopicArn = $topicArn |
+             .States.NotifyFailure.Parameters.TopicArn = $topicArn' \
+            nyc_tlc_orchestration.asl.json > "${RUNNER_TEMP}/nyc_tlc_orchestration.asl.json"
+
+          aws stepfunctions update-state-machine \
+            --state-machine-arn "${STATE_MACHINE_ARN}" \
+            --definition "file://${RUNNER_TEMP}/nyc_tlc_orchestration.asl.json"
+        env:
+          AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
