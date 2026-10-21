@@ -279,6 +279,40 @@ or
 
 ---
 
+## CI/CD deployment
+
+The GitHub Actions workflow at `.github/workflows/deploy.yml` is manual-only:
+pushes to any branch, including `main`, do not deploy. When you are ready, run it
+from the GitHub Actions tab using **Run workflow**. It validates the Python
+syntax and Step Functions definition, then uploads the three Glue scripts,
+updates the existing Glue jobs and Lambda functions, and updates the existing
+Step Functions state machine. This workflow updates existing AWS resources; it
+does not provision the S3 deployment bucket, Glue jobs, Lambda functions, SNS
+topic, or state machine.
+
+Configure these GitHub repository settings before running the workflow:
+
+| Setting | Type | Description |
+| --- | --- | --- |
+| `AWS_DEPLOY_ROLE_ARN` | Secret | ARN of an IAM role the workflow can assume through GitHub OIDC. |
+| `DEPLOYMENT_BUCKET` | Variable | Existing S3 bucket for the deployed Glue scripts. |
+| `STATE_MACHINE_ARN` | Variable | ARN of the existing Step Functions state machine to update. |
+| `AWS_REGION` | Variable, optional | AWS region; defaults to `us-east-1`. |
+| `BUCKET_CREATION_LAMBDA_NAME` | Variable, optional | Bucket Lambda function name; defaults to `bucket_creation`. |
+| `CRAWLER_SETUP_LAMBDA_NAME` | Variable, optional | Crawler setup Lambda name; defaults to `nyc-tlc-create-crawlers`. |
+| `SNS_TOPIC_NAME` | Variable, optional | SNS topic name; defaults to `nyc-tlc-topic`. |
+
+Configure the IAM role's GitHub OIDC trust policy to allow this repository and
+grant the deployment permissions required to upload to the deployment bucket,
+update the three Glue jobs, update both Lambda functions, and update the state
+machine. The Glue execution role must also be able to read the uploaded script
+objects; using the same project S3 bucket for `DEPLOYMENT_BUCKET` avoids needing
+additional bucket access for the existing Glue role. The AWS account ID and
+region are used to build the Lambda and SNS ARNs in the Step Functions
+definition, avoiding account-specific ARNs in the deployment.
+
+---
+
 ## Prerequisites
 
 Before deploying this pipeline, ensure the following are available in the target AWS account:
